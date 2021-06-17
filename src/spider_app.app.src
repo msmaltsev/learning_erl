@@ -1,0 +1,16 @@
+{application, spider_app, [
+    {description, "simple spider"},
+    {vsn, "0.1"},
+    {modules, [
+        spider, 
+        spider_sup
+    ]},
+    {mod, {spider_app, []}},
+    {registered, []},
+    {applications, [
+        kernel,
+        stdlib,
+        hackney
+    ]},
+    {env, []}
+    ]}.
