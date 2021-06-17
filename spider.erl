@@ -37,7 +37,7 @@ disable(Pid) ->
 
 %% info
 handle_info(perform, SpiderState = #spider_state{working_status=disabled}) ->
-    self() ! perform,
+    % self() ! perform,
     {noreply, SpiderState};
 
 handle_info(perform, #spider_state{working_status=enabled, cooldown=Ms, url=Url, action=idle}) ->
@@ -72,6 +72,7 @@ handle_call(enable, _From, SpiderState = #spider_state{working_status = enabled}
 
 
 handle_call(enable, _From, #spider_state{working_status = disabled, url=Url, cooldown=Cooldown}) ->
+    self() ! perform,
     {reply, {ok, enabled}, #spider_state{working_status=enabled, url=Url, cooldown = Cooldown}};
 
 
