@@ -10,14 +10,14 @@
 
 %% behavior
 start_link(Url, Cooldown) ->
-    gen_server:start_link({local, ?MODULE}, ?MODULE, {Url, Cooldown}, []).
+    gen_server:start_link(?MODULE, {Url, Cooldown}, []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop).
 
 init({Url, Cooldown}) ->
     self() ! perform,
-    {ok, #spider_state{working_status = disabled, url=Url, action=idle, cooldown = Cooldown}}.
+    {ok, #spider_state{working_status = enabled, url=Url, action=idle, cooldown = Cooldown}}.
 
 code_change(_OldVsn, SpiderState, _Extra) ->
     {ok, SpiderState}.
@@ -42,16 +42,15 @@ handle_info(perform, SpiderState = #spider_state{working_status=disabled}) ->
 
 handle_info(perform, #spider_state{working_status=enabled, cooldown=Ms, url=Url, action=idle}) ->
     
-    io:format("woke up, went to is ~p~n", [Url]),
+    io:format("woke up, target url is ~p~n", [Url]),
     self() ! perform,
     {noreply, #spider_state{working_status=enabled, cooldown = Ms, url = Url, action = traverse}};
 
 
 handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms, action=traverse}) ->
 
-    io:format("traversing~n"),
+    io:format("image we traversing to ~p~n", [Url]),
     % catch errors - send to action failure - coming soon, it's almost 1 am, for christ sake, i wanna play wolfenstein
-    io:format("~p~n", [Url]),
     {ok, StatusCode, RespHeaders, ClientRef} = hackney:request(get, Url, [], <<>>, []),
     io:format("Status: ~p~n", [StatusCode]),
     self() ! perform,
@@ -60,8 +59,8 @@ handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms,
 
 handle_info(perform, #spider_state{working_status=enabled, cooldown=Cooldown, url=Url, action=success}) ->
 
-    io:format("done traversing~n"),
-    io:format("next traverse in ~p~n", [Cooldown]),
+    io:format("done traversing ~p, next in~p~n", [Url, Cooldown]),
+    % io:format("next traverse in ~p~n", [Cooldown]),
     {ok, _Timer} = timer:send_after(Cooldown, self(), perform),
     {noreply, #spider_state{working_status=enabled, cooldown = Cooldown, url=Url, action = idle}}.
 
@@ -84,9 +83,9 @@ handle_call(disable, _From, SpiderState = #spider_state{working_status = disable
     {reply, {ok, already_disabled}, SpiderState};
 
 
-handle_call(stop, _From, SpiderState = #spider_state{working_status = enabled}) ->
-    {reply, {ok, cant_stop_enabled}, SpiderState};
+% handle_call(stop, _From, SpiderState = #spider_state{working_status = enabled}) ->
+%     {reply, {ok, cant_stop_enabled}, SpiderState};
 
 
-handle_call(stop, _From, SpiderState = #spider_state{working_status = disabled}) ->
+handle_call(stop, _From, SpiderState) ->
     {stop, normal, ok, SpiderState}.
