@@ -13,6 +13,7 @@
 -include_app("hackney/include/hackney_lib.hrl").
 -include_lib("xmerl/include/xmerl.hrl").
 
+
 %% behavior
 start_link(Url, Cooldown, MostRecent) ->
     gen_server:start_link(?MODULE, {Url, Cooldown, MostRecent}, []).
@@ -20,7 +21,7 @@ start_link(Url, Cooldown, MostRecent) ->
 start_link() ->
     Url = "https://meduza.io/rss2/all",
     Cooldown = 5000,
-    MostRecent = {{0,0,0}, {0,0,0}},
+    MostRecent = {{2021,6,25}, {0,0,0}},
     io:format("launching with parameters: ~p, ~p, ~p~n", [Url, Cooldown, MostRecent]),
     gen_server:start_link(?MODULE, {Url, Cooldown, MostRecent}, []).
 
@@ -102,7 +103,7 @@ handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms,
     Items = xmerl_xpath:string("/rss/channel//item", Xml),
     % io:format("~p~n", [Items]),
 
-    Docs = lists:map(fun(Item) -> % generating doc from each item
+    Docs = lists:flatmap(fun(Item) -> % generating doc from each item
 
         [{xmlText,[_|_],1,[],DocUrl,_}] = xmerl_xpath:string("//link/text()", Item),
         % io:format("~p~n", [DocUrl]),
@@ -124,12 +125,17 @@ handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms,
         end,
 
         NiceTime = parse_rfc_time(DocTime),
-        io:format("NiceTime ~p~n", [NiceTime]),
-        io:format("MostRecent ~p~n", [MostRecent]),
+        % io:format("NiceTime ~p~n", [NiceTime]),
+        % io:format("MostRecent ~p~n", [MostRecent]),
 
-        case NiceTime of
+        % io:format("~p~n", [is_list(DocBody)]),
+        % NiceBody = list_to_binary(DocBody),
+        % io:format("~p~n", [NiceBody]),
+        % NiceTitle = list_to_binary(DocTitle),
+
+        case NiceTime of 
             N when N > MostRecent ->
-                #{
+                [#{
                     title => DocTitle,
                     body => DocBody,
                     url => DocUrl, 
@@ -138,8 +144,9 @@ handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms,
                     author_extid => DocAuthor,
                     images => [EnclosureUrl],
                     type => "p"
-                }
-            end
+                }];
+            N when N =< MostRecent -> []
+        end
 
         end, Items),
 
@@ -149,10 +156,33 @@ handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms,
         maps:get(time, Doc)
         end, Docs),
 
-    NewMostRecent = lists:max(Times),
+    case Times of
+        [] -> 
+            NewMostRecent = MostRecent;
+        _ ->
+            NewMostRecent = lists:max(Times)
+        end,
+
+    % io:format("~p~n", [Times]),
+    % NewDocs = lists:filter(fun(Doc) ->
+    %     maps:get(time, Doc) > MostRecent
+    %     end, Docs),
 
     % io:format("~p~n", [Docs]),
     io:format("~p docs downloaded~n", [lists:flatlength(Docs)]),
+    % io:format("~p~n", [Docs]),
+
+    case Docs of 
+        [] -> 
+            io:format("no docs to write~n");
+        _ ->
+            Filename = Platform ++ "." ++ integer_to_list(erlang:system_time()) ++ ".txt",
+
+            {ok, F} = file:open(Filename, [write]),
+            io:format(F, "~p~n", [Docs]),
+            io:format("wrote docs to file ~p~n", [Filename])
+        end,
+
 
     self() ! perform,
     {noreply, #spider_state{working_status=enabled, cooldown = Ms, url=Url, most_recent = NewMostRecent, action = success}};
@@ -160,8 +190,7 @@ handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms,
 
 handle_info(perform, #spider_state{working_status=enabled, cooldown=Cooldown, url=Url, most_recent = MostRecent, action=success}) ->
 
-    io:format("done traversing ~p, next in ~p. newest doc from ~p~n~n~n", [Url, Cooldown, MostRecent]),
-    % io:format("next traverse in ~p~n", [Cooldown]),
+    io:format("done traversing ~p, next traverse in ~p. newest doc from ~p~n~n~n", [Url, Cooldown, MostRecent]),
     {ok, _Timer} = timer:send_after(Cooldown, self(), perform),
     {noreply, #spider_state{working_status=enabled, cooldown = Cooldown, url=Url, most_recent = MostRecent, action = idle}}.
 
