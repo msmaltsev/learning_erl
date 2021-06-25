@@ -1,12 +1,14 @@
 -module(spider).
--export([start_link/2, stop/1, enable/1, disable/1, start_link/0]).
+-export([start_link/2, stop/1, enable/1, disable/1, start_link/0, month_name_to_integer/1]).
 -export([code_change/3, handle_call/3, handle_cast/2, handle_info/2, init/1, terminate/2]).
 -behaviour(gen_server).
 
 -record(spider_state, {working_status = disabled, 
                         action = idle, 
                         url = url,
-                        cooldown = 10000}).
+                        cooldown = 10000, 
+                        most_recent = {{0,0,0},{0,0,0}}
+                    }).
 
 -include_app("hackney/include/hackney_lib.hrl").
 -include_lib("xmerl/include/xmerl.hrl").
@@ -44,19 +46,44 @@ enable(Pid) ->
 disable(Pid) ->
     gen_server:call(Pid, disable).
 
+month_name_to_integer(<<"Jan">>) -> 1;
+month_name_to_integer(<<"Feb">>) -> 2;
+month_name_to_integer(<<"Mar">>) -> 3;
+month_name_to_integer(<<"Apr">>) -> 4;
+month_name_to_integer(<<"May">>) -> 5;
+month_name_to_integer(<<"Jun">>) -> 6;
+month_name_to_integer(<<"Jul">>) -> 7;
+month_name_to_integer(<<"Aug">>) -> 8;
+month_name_to_integer(<<"Sep">>) -> 9;
+month_name_to_integer(<<"Oct">>) -> 10;
+month_name_to_integer(<<"Nov">>) -> 11;
+month_name_to_integer(<<"Dec">>) -> 12.
+
+parse_rfc_time(Dt_str) ->
+    <<_:5/binary, D:2/binary, _:1/binary, M:3/binary, _:1/binary, Y:4/binary, _:1/binary, H:2/binary, _:1/binary, Mi:2/binary, _:1/binary, S:2/binary, _/binary>> = list_to_binary(Dt_str),
+    {{
+        list_to_integer(binary_to_list(Y)), 
+        month_name_to_integer(M), 
+        list_to_integer(binary_to_list(D))
+    }, {
+        list_to_integer(binary_to_list(H)), 
+        list_to_integer(binary_to_list(Mi)), 
+        list_to_integer(binary_to_list(S))
+    }}.
+
 %% info
 handle_info(perform, SpiderState = #spider_state{working_status=disabled}) ->
     % self() ! perform,
     {noreply, SpiderState};
 
-handle_info(perform, #spider_state{working_status=enabled, cooldown=Ms, url=Url, action=idle}) ->
+handle_info(perform, #spider_state{working_status=enabled, cooldown=Ms, url=Url, most_recent = MostRecent, action=idle}) ->
     
     io:format("woke up, target url is ~p~n", [Url]),
     self() ! perform,
-    {noreply, #spider_state{working_status=enabled, cooldown = Ms, url = Url, action = traverse}};
+    {noreply, #spider_state{working_status=enabled, cooldown = Ms, url = Url, most_recent = MostRecent, action = traverse}};
 
 
-handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms, action=traverse}) ->
+handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms, most_recent = MostRecent, action=traverse}) ->
 
     io:format("image we traversing to ~p~n", [Url]),
     {ok, Platform} = maps:find(host, uri_string:parse(Url)),
@@ -73,31 +100,64 @@ handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms,
 
     Items = xmerl_xpath:string("/rss/channel//item", Xml),
     % io:format("~p~n", [Items]),
-    lists:foreach(fun(Item) -> 
-                        io:format("-----------~n"),
-                        io:format("URL: ~p~n", [xmerl_xpath:string("//link/text()", Item)]),
-                        io:format("TIME: ~p~n", [xmerl_xpath:string("//pubDate/text()", Item)]),
-                        io:format("DESCRIPTION: ~p~n", [xmerl_xpath:string("//description/text()", Item)]),
+    lists:map(fun(Item) -> % generating doc from each item
 
-                        case xmerl_xpath:string("//author/text()", Item) of
-                            [] -> 
-                                io:format("AUTHOR: ~p~n", [Platform]);
-                            _ ->
-                                io:format("AUTHOR: ~p~n", [xmerl_xpath:string("//author/text()", Item)])
-                        end
+        [{xmlText,[_|_],1,[],DocUrl,_}] = xmerl_xpath:string("//link/text()", Item),
+        % io:format("~p~n", [DocUrl]),
+        [{xmlText,[_|_],1,[],DocTime,_}] = xmerl_xpath:string("//pubDate/text()", Item),
+        % io:format("~p~n", [DocDate]),
+        [{xmlText,[_|_],1,[],DocBody,_}] = xmerl_xpath:string("//description/text()", Item),
+        % io:format("~p~n", [DocBody]),
+        [{xmlText,[_|_],1,[],DocTitle,_}] = xmerl_xpath:string("//title/text()", Item),
+        % io:format("~p~n", [DocTitle]),
+        [{xmlAttribute,url,[],[],[],[_|_],1,[],EnclosureUrl,_}] = xmerl_xpath:string("//enclosure/@url", Item),
+        % io:format("~p~n", [EnclosureUrl]),
+
+        case xmerl_xpath:string("//author/text()", Item) of
+            [] -> 
+                % io:format("AUTHOR: ~p~n", [Platform]);
+                DocAuthor = Platform;
+            _ ->
+                [{xmlText,[_|_],1,[],DocAuthor,_}] = xmerl_xpath:string("//author/text()", Item)
+        end,
+
+        Doc = #{
+            title => DocTitle,
+            body => DocBody,
+            url => DocUrl,
+            time => DocTime,
+            author_name => DocAuthor,
+            author_extid => DocAuthor,
+            images => [EnclosureUrl],
+            type => "p"
+        },
+
+        MsDocTime = parse_rfc_time(DocTime),
+        % io:format("~p~n", [MsDocTime]),
+        % io:format("~p~n", [MostRecent]),
+        case lists:max([MsDocTime, MostRecent]) of 
+            MsDocTime ->
+                % io:format("~p~n", [Doc]);
+                io:format("~p~n", [Doc]);
+            MostRecent ->
+                io:format("doc too old~n", [])
+        end
+        
+        % max({{0,0,0},{0,0,0}}, {{2021,6,24},{17,2,35}}, {{0,0,0},{0,0,0}}, {{2021,6,24},{16,58,58}}, {{0,0,0},{0,0,0}}).
+        % io:format("~p~n", [Doc])
 
         end, Items),
 
     self() ! perform,
-    {noreply, #spider_state{working_status=enabled, cooldown = Ms, url=Url, action = success}};
+    {noreply, #spider_state{working_status=enabled, cooldown = Ms, url=Url, most_recent = MostRecent, action = success}};
 
 
-handle_info(perform, #spider_state{working_status=enabled, cooldown=Cooldown, url=Url, action=success}) ->
+handle_info(perform, #spider_state{working_status=enabled, cooldown=Cooldown, url=Url, most_recent = MostRecent, action=success}) ->
 
-    io:format("done traversing ~p, next in~p~n", [Url, Cooldown]),
+    io:format("done traversing ~p, next in ~p~n", [Url, Cooldown]),
     % io:format("next traverse in ~p~n", [Cooldown]),
     {ok, _Timer} = timer:send_after(Cooldown, self(), perform),
-    {noreply, #spider_state{working_status=enabled, cooldown = Cooldown, url=Url, action = idle}}.
+    {noreply, #spider_state{working_status=enabled, cooldown = Cooldown, url=Url, most_recent = MostRecent, action = idle}}.
 
 
 %% calls
