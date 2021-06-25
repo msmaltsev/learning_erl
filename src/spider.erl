@@ -1,5 +1,5 @@
 -module(spider).
--export([start_link/2, stop/1, enable/1, disable/1, start_link/0, month_name_to_integer/1]).
+-export([start_link/3, stop/1, enable/1, disable/1, start_link/0, month_name_to_integer/1]).
 -export([code_change/3, handle_call/3, handle_cast/2, handle_info/2, init/1, terminate/2]).
 -behaviour(gen_server).
 
@@ -14,21 +14,22 @@
 -include_lib("xmerl/include/xmerl.hrl").
 
 %% behavior
-start_link(Url, Cooldown) ->
-    gen_server:start_link(?MODULE, {Url, Cooldown}, []).
+start_link(Url, Cooldown, MostRecent) ->
+    gen_server:start_link(?MODULE, {Url, Cooldown, MostRecent}, []).
 
 start_link() ->
     Url = "https://meduza.io/rss2/all",
-    Cooldown = 1000000,
-    io:format("launching with parameters: ~p, ~p~n", [Url, Cooldown]),
-    gen_server:start_link(?MODULE, {Url, Cooldown}, []).
+    Cooldown = 5000,
+    MostRecent = {{0,0,0}, {0,0,0}},
+    io:format("launching with parameters: ~p, ~p, ~p~n", [Url, Cooldown, MostRecent]),
+    gen_server:start_link(?MODULE, {Url, Cooldown, MostRecent}, []).
 
 stop(Pid) ->
     gen_server:call(Pid, stop).
 
-init({Url, Cooldown}) ->
+init({Url, Cooldown, MostRecent}) ->
     self() ! perform,
-    {ok, #spider_state{working_status = enabled, url=Url, action=idle, cooldown = Cooldown}}.
+    {ok, #spider_state{working_status = enabled, url=Url, action=idle, most_recent = MostRecent, cooldown = Cooldown}}.
 
 code_change(_OldVsn, SpiderState, _Extra) ->
     {ok, SpiderState}.
@@ -85,7 +86,7 @@ handle_info(perform, #spider_state{working_status=enabled, cooldown=Ms, url=Url,
 
 handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms, most_recent = MostRecent, action=traverse}) ->
 
-    io:format("image we traversing to ~p~n", [Url]),
+    io:format("traversing to ~p. most_recent is ~p~n", [Url, MostRecent]),
     {ok, Platform} = maps:find(host, uri_string:parse(Url)),
     {ok, StatusCode, RespHeaders, ClientRef} = hackney:request(get, Url, [], <<>>, []),
     io:format("Status: ~p~n", [StatusCode]),
@@ -100,7 +101,8 @@ handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms,
 
     Items = xmerl_xpath:string("/rss/channel//item", Xml),
     % io:format("~p~n", [Items]),
-    lists:map(fun(Item) -> % generating doc from each item
+
+    Docs = lists:map(fun(Item) -> % generating doc from each item
 
         [{xmlText,[_|_],1,[],DocUrl,_}] = xmerl_xpath:string("//link/text()", Item),
         % io:format("~p~n", [DocUrl]),
@@ -121,40 +123,44 @@ handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms,
                 [{xmlText,[_|_],1,[],DocAuthor,_}] = xmerl_xpath:string("//author/text()", Item)
         end,
 
-        Doc = #{
-            title => DocTitle,
-            body => DocBody,
-            url => DocUrl, 
-            time => DocTime,
-            author_name => DocAuthor,
-            author_extid => DocAuthor,
-            images => [EnclosureUrl],
-            type => "p"
-        },
+        NiceTime = parse_rfc_time(DocTime),
+        io:format("NiceTime ~p~n", [NiceTime]),
+        io:format("MostRecent ~p~n", [MostRecent]),
 
-        MsDocTime = parse_rfc_time(DocTime),
-        % io:format("~p~n", [MsDocTime]),
-        % io:format("~p~n", [MostRecent]),
-        case lists:max([MsDocTime, MostRecent]) of 
-            MsDocTime ->
-                % io:format("~p~n", [Doc]);
-                io:format("~p~n", [Doc]);
-            MostRecent ->
-                io:format("doc too old~n", [])
-        end
-        
-        % max({{0,0,0},{0,0,0}}, {{2021,6,24},{17,2,35}}, {{0,0,0},{0,0,0}}, {{2021,6,24},{16,58,58}}, {{0,0,0},{0,0,0}}).
-        % io:format("~p~n", [Doc])
+        case NiceTime of
+            N when N > MostRecent ->
+                #{
+                    title => DocTitle,
+                    body => DocBody,
+                    url => DocUrl, 
+                    time => NiceTime,
+                    author_name => DocAuthor,
+                    author_extid => DocAuthor,
+                    images => [EnclosureUrl],
+                    type => "p"
+                }
+            end
 
         end, Items),
 
+    % io:format("~p~n", [AllDocuments]),
+
+    Times = lists:map(fun(Doc) ->
+        maps:get(time, Doc)
+        end, Docs),
+
+    NewMostRecent = lists:max(Times),
+
+    % io:format("~p~n", [Docs]),
+    io:format("~p docs downloaded~n", [lists:flatlength(Docs)]),
+
     self() ! perform,
-    {noreply, #spider_state{working_status=enabled, cooldown = Ms, url=Url, most_recent = MostRecent, action = success}};
+    {noreply, #spider_state{working_status=enabled, cooldown = Ms, url=Url, most_recent = NewMostRecent, action = success}};
 
 
 handle_info(perform, #spider_state{working_status=enabled, cooldown=Cooldown, url=Url, most_recent = MostRecent, action=success}) ->
 
-    io:format("done traversing ~p, next in ~p~n", [Url, Cooldown]),
+    io:format("done traversing ~p, next in ~p. newest doc from ~p~n~n~n", [Url, Cooldown, MostRecent]),
     % io:format("next traverse in ~p~n", [Cooldown]),
     {ok, _Timer} = timer:send_after(Cooldown, self(), perform),
     {noreply, #spider_state{working_status=enabled, cooldown = Cooldown, url=Url, most_recent = MostRecent, action = idle}}.
