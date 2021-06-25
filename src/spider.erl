@@ -124,7 +124,7 @@ handle_info(perform, #spider_state{working_status=enabled, url=Url, cooldown=Ms,
         Doc = #{
             title => DocTitle,
             body => DocBody,
-            url => DocUrl,
+            url => DocUrl, 
             time => DocTime,
             author_name => DocAuthor,
             author_extid => DocAuthor,
